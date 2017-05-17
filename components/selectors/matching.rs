@@ -1,8 +1,10 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+use attr::{AttrSelectorOperation, NamespaceConstraint};
 use bloom::BloomFilter;
-use parser::{CaseSensitivity, Combinator, ComplexSelector, Component, LocalName};
+use parser::{Combinator, ComplexSelector, Component, LocalName};
 use parser::{Selector, SelectorInner, SelectorIter, SelectorImpl};
 use std::borrow::Borrow;
 use tree::Element;
@@ -385,8 +387,7 @@ fn matches_simple_selector<E, F>(
             element.match_pseudo_element(pseudo, context)
         }
         Component::LocalName(LocalName { ref name, ref lower_name }) => {
-            let name = if element.is_html_element_in_html_document() { lower_name } else { name };
-            element.get_local_name() == name.borrow()
+            element.get_local_name() == select_name(element, name, lower_name).borrow()
         }
         Component::ExplicitUniversalType |
         Component::ExplicitAnyNamespace => {
@@ -397,9 +398,8 @@ fn matches_simple_selector<E, F>(
             element.get_namespace() == url.borrow()
         }
         Component::ExplicitNoNamespace => {
-            // Rust type’s default, not default namespace
-            let empty_string = <E::Impl as SelectorImpl>::NamespaceUrl::default();
-            element.get_namespace() == empty_string.borrow()
+            let ns = ::parser::namespace_empty_string::<E::Impl>();
+            element.get_namespace() == ns.borrow()
         }
         // TODO: case-sensitivity depends on the document type and quirks mode
         Component::ID(ref id) => {
@@ -409,35 +409,58 @@ fn matches_simple_selector<E, F>(
         Component::Class(ref class) => {
             element.has_class(class)
         }
-        Component::AttrExists(ref attr) => {
-            element.match_attr_has(attr)
+        Component::AttributeInNoNamespaceExists { ref local_name, ref local_name_lower } => {
+            element.attr_matches(
+                &NamespaceConstraint::Specific(&::parser::namespace_empty_string::<E::Impl>()),
+                select_name(element, local_name, local_name_lower),
+                &AttrSelectorOperation::Exists
+            )
         }
-        Component::AttrEqual(ref attr, ref value, case_sensitivity) => {
-            match case_sensitivity {
-                CaseSensitivity::CaseSensitive => element.match_attr_equals(attr, value),
-                CaseSensitivity::CaseInsensitive => element.match_attr_equals_ignore_ascii_case(attr, value),
+        Component::AttributeInNoNamespace {
+            ref local_name,
+            ref local_name_lower,
+            ref value,
+            operator,
+            case_sensitivity,
+            never_matches,
+        } => {
+            if never_matches {
+                false
+            } else {
+                element.attr_matches(
+                    &NamespaceConstraint::Specific(&::parser::namespace_empty_string::<E::Impl>()),
+                    select_name(element, local_name, local_name_lower),
+                    &AttrSelectorOperation::WithValue {
+                        operator: operator,
+                        case_sensitivity: case_sensitivity,
+                        expected_value: value,
+                    }
+                )
             }
         }
-        Component::AttrIncludes(ref attr, ref value) => {
-            element.match_attr_includes(attr, value)
-        }
-        Component::AttrDashMatch(ref attr, ref value) => {
-            element.match_attr_dash(attr, value)
-        }
-        Component::AttrPrefixMatch(ref attr, ref value) => {
-            element.match_attr_prefix(attr, value)
-        }
-        Component::AttrSubstringMatch(ref attr, ref value) => {
-            element.match_attr_substring(attr, value)
-        }
-        Component::AttrSuffixMatch(ref attr, ref value) => {
-            element.match_attr_suffix(attr, value)
-        }
-        Component::AttrIncludesNeverMatch(..) |
-        Component::AttrPrefixNeverMatch(..) |
-        Component::AttrSubstringNeverMatch(..) |
-        Component::AttrSuffixNeverMatch(..) => {
-            false
+        Component::AttributeOther(ref attr_sel) => {
+            if attr_sel.never_matches {
+                return false
+            } else {
+                element.attr_matches(
+                    &attr_sel.namespace(),
+                    select_name(element, &attr_sel.local_name, &attr_sel.local_name_lower),
+                    &match attr_sel.operation {
+                        AttrSelectorOperation::Exists => AttrSelectorOperation::Exists,
+                        AttrSelectorOperation::WithValue {
+                            operator,
+                            case_sensitivity,
+                            ref expected_value,
+                        } => {
+                            AttrSelectorOperation::WithValue {
+                                operator: operator,
+                                case_sensitivity: case_sensitivity,
+                                expected_value: expected_value,
+                            }
+                        }
+                    }
+                )
+            }
         }
         Component::NonTSPseudoClass(ref pc) => {
             element.match_non_ts_pseudo_class(pc, context, flags_setter)
@@ -486,6 +509,17 @@ fn matches_simple_selector<E, F>(
         Component::Negation(ref negated) => {
             !negated.iter().all(|ss| matches_simple_selector(ss, element, context, flags_setter))
         }
+    }
+}
+
+fn select_name<'a, E>(element: &E, local_name: &'a <E::Impl as SelectorImpl>::LocalName,
+                      local_name_lower: &'a <E::Impl as SelectorImpl>::LocalName)
+                      -> &'a <E::Impl as SelectorImpl>::LocalName
+where E: Element {
+    if element.is_html_element_in_html_document() {
+        local_name_lower
+    } else {
+        local_name
     }
 }
 
